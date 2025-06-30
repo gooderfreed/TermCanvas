@@ -651,13 +651,21 @@ void tc_put_pixel(TermCanvas *canvas, int x, int y, wchar_t symbol, Color foregr
  */
 void tc_fill_area(TermCanvas *canvas, int x, int y, int width, int height, wchar_t symbol, Color foreground, Color background, TcEffect effect) {
     if (!canvas) return; // NULL check
-    if (x < 0 || y < 0 || height <= 0 || width <= 0) return;
-    if (x + width > canvas->width || y + height > canvas->height) return;
 
-    TcPixel pixel = (TcPixel) {background, foreground, symbol, effect}; // Create the pixel
-    for (int i = y; i < y + height; i++) {
-        for (int j = x; j < x + width; j++) {
-            SET_PIXEL(&canvas->pixels[i][j], pixel); // Set the pixel using the macro
+    int x1 = (x < 0) ? 0 : x;
+    int y1 = (y < 0) ? 0 : y;
+    
+    int x2 = x + width;
+    x2 = (x2 > canvas->width) ? canvas->width : x2;
+    int y2 = y + height;
+    y2 = (y2 > canvas->height) ? canvas->height : y2;
+
+    if (x1 < x2 && y1 < y2) {
+        TcPixel pixel = (TcPixel) {background, foreground, symbol, effect}; // Create the pixel
+        for (int i = y1; i < y2; i++) {
+            for (int j = x1; j < x2; j++) {
+                SET_PIXEL(&canvas->pixels[i][j], pixel); // Set the pixel using the macro
+            }
         }
     }
 }
