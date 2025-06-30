@@ -2,11 +2,13 @@
 #define COLOR_H
 
 #include <stdint.h>
+#include <stdbool.h>
 
 /*
  * Color structure
  * Represents a 32-bit color value (0x00RRGGBB)
  */
+typedef struct Color Color;
 struct Color {
     uint32_t color; // 32-bit integer for color (0x00RRGGBB)
 };
@@ -174,22 +176,22 @@ struct Color {
 /*
  * Extracts the red component from a 32-bit color.
  */
-inline unsigned char get_red(Color color) { return (color.color >> 16) & 0xFF; }
+static inline unsigned char get_red(Color color) { return (color.color >> 16) & 0xFF; }
 
 /*
  * Extracts the green component from a 32-bit color.
  */
-inline unsigned char get_green(Color color) { return (color.color >> 8) & 0xFF; }
+static inline unsigned char get_green(Color color) { return (color.color >> 8) & 0xFF; }
 
 /*
  * Extracts the blue component from a 32-bit color.
  */
-inline unsigned char get_blue(Color color) { return color.color & 0xFF; }
+static inline unsigned char get_blue(Color color) { return color.color & 0xFF; }
 
 /*
  * Checks if a color is set to the 'NONE' value.
  */
-inline bool is_none(Color color) { return color.color == COLOR_NONE.color; }
+static inline bool is_none(Color color) { return color.color == COLOR_NONE.color; }
 
 /*
  * Creates a 32-bit RGB color from individual red, green, and blue components.

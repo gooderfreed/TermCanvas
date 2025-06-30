@@ -25,11 +25,15 @@
 
 
 // Terminal control macros
-#define clear()       wprintf(L"\033[H\033[J")          // Clear the entire screen
-#define gotoxy(x, y)  wprintf(L"\033[%d;%dH", (y), (x)) // Position cursor
-#define hide_cursor() wprintf(L"\033[?25l")             // Hide the cursor
-#define show_cursor() wprintf(L"\033[?25h")             // Show the cursor
+#define tc_clear()       wprintf(L"\033[H\033[J")          // Clear the entire screen
+#define tc_gotoxy(x, y)  wprintf(L"\033[%d;%dH", (y), (x)) // Position cursor
+#define tc_hide_cursor() wprintf(L"\033[?25l")             // Hide the cursor
+#define tc_show_cursor() wprintf(L"\033[?25h")             // Show the cursor
 
+
+typedef enum TcEffect TcEffect;
+typedef struct TcPixel TcPixel;
+typedef struct TermCanvas TermCanvas;
 
 // -----------------------------------------------------------------------------
 //  Type Definitions
@@ -37,7 +41,7 @@
 /*
  * Text effects (bold, italic, etc.).
  */
-enum TextEffect {
+enum TcEffect {
     Effect_None      = 0,
     Effect_Bold      = 1,  // Bold/bright
     Effect_Italic    = 3,  // Italic (not widely supported)
@@ -50,11 +54,11 @@ enum TextEffect {
 /*
  * Represents a single pixel on the screen.
  */
-struct Pixel {
-    Color      background; // Background color
-    Color      foreground; // Foreground color
-    wchar_t    symbol;     // Character to display
-    TextEffect effect;     // Text effect (bold, italic, etc.)
+struct TcPixel {
+    Color    background; // Background color
+    Color    foreground; // Foreground color
+    wchar_t  symbol;     // Character to display
+    TcEffect effect;     // Text effect (bold, italic, etc.)
 };
 
 /*
@@ -77,7 +81,7 @@ typedef enum {
 struct TermCanvas {
     int height;        // Screen height in pixels
     int width;         // Screen width in pixels
-    Pixel **pixels;    // 2D array of pixel data
+    TcPixel **pixels;    // 2D array of pixel data
     
     wchar_t *buffer;   // Render buffer for output
     int buffer_size;   // Size of the render buffer
@@ -93,21 +97,22 @@ struct TermCanvas {
 
 // Screen management
 #ifdef USE_ARENA
-TermCanvas *init_screen(Arena *arena, int width, int height, Color background, Color foreground, wchar_t symbol);
+TermCanvas *tc_create(Arena *arena, int width, int height, wchar_t symbol, Color foreground, Color background);
 #else
-TermCanvas *init_screen(int width, int height, Color background, Color foreground, wchar_t symbol);
+TermCanvas *tc_create(int width, int height, wchar_t symbol, Color foreground, Color background);
 #endif
 
-void screen_shutdown(TermCanvas *screen);
-void print_screen(const TermCanvas *screen);
+void tc_destroy(TermCanvas *canvas);
+void tc_show(const TermCanvas *canvas);
 
 // Drawing functions
-void add_borders(TermCanvas   *screen, int y, int x, int height, int width, Color background, Color foreground, const wchar_t *borders);
-void add_separator(TermCanvas *screen, int y, int x, Color background, Color foreground, const wchar_t *borders);
-void fill_area(TermCanvas     *screen, int y, int x, int height, int width, wchar_t symbol, Color background, Color foreground);
-void put_pixel(TermCanvas     *screen, int y, int x, wchar_t symbol, Color background, Color foreground, TextEffect effect);
-void insert_text(TermCanvas   *screen, int y, int x, const char *text, Color foreground, Color background, TextEffect effect);
-void insert_wtext(TermCanvas  *screen, int y, int x, const wchar_t *text, Color foreground, Color background, TextEffect effect);
+void tc_draw_borders(TermCanvas *canvas, int x, int y, int width, int height, const wchar_t *borders, Color foreground, Color background, TcEffect effect);
+void tc_draw_hline(TermCanvas   *canvas, int x, int y,                        const wchar_t *borders, Color foreground, Color background, TcEffect effect);
+void tc_draw_wline(TermCanvas   *canvas, int x, int y,                        const wchar_t *borders, Color foreground, Color background, TcEffect effect);
+void tc_fill_area(TermCanvas    *canvas, int x, int y, int width, int height, wchar_t symbol,         Color foreground, Color background, TcEffect effect);
+void tc_put_pixel(TermCanvas    *canvas, int x, int y,                        wchar_t symbol,         Color foreground, Color background, TcEffect effect);
+void tc_draw_text(TermCanvas    *canvas, int x, int y,                        const char *text,       Color foreground, Color background, TcEffect effect);
+void tc_draw_wtext(TermCanvas   *canvas, int x, int y,                        const wchar_t *text,    Color foreground, Color background, TcEffect effect);
 
 
 // -----------------------------------------------------------------------------
@@ -139,7 +144,7 @@ void insert_wtext(TermCanvas  *screen, int y, int x, const wchar_t *text, Color 
  * Generates an ANSI escape sequence for text effects.
  * It formats the text effect into the ANSI escape sequence.
  */
-static char* get_effect_ansi(TextEffect effect) {
+static char* get_effect_ansi(TcEffect effect) {
     static char ansi_str[16];             // Buffer for the ANSI escape sequence
     if (effect == Effect_None) return ""; // Return empty string if no effect
 
@@ -440,66 +445,64 @@ static char* get_color_ansi(Color fg_color, Color bg_color, TerminalMode mode) {
  * Creates the screen structure with cleared buffers and sets the terminal mode.
  */
 #ifdef USE_ARENA
-TermCanvas *init_screen(Arena *arena, int width, int height, Color background, Color foreground, wchar_t symbol) {
-    TermCanvas *screen = (TermCanvas *)arena_alloc(arena, sizeof(TermCanvas));
+TermCanvas *tc_create(Arena *arena, int width, int height, wchar_t symbol, Color foreground, Color background) {
+    TermCanvas *canvas = (TermCanvas *)arena_alloc(arena, sizeof(TermCanvas));
 #else
-TermCanvas *init_screen(int width, int height, Color background, Color foreground, wchar_t symbol) {
-    TermCanvas *screen = (TermCanvas *)malloc(sizeof(TermCanvas));
+TermCanvas *tc_create(int width, int height, wchar_t symbol, Color foreground, Color background) {
+    TermCanvas *canvas = (TermCanvas *)malloc(sizeof(TermCanvas));
 #endif
-    screen->width = width;
-    screen->height = height;
-    screen->mode = get_terminal_mode();
+    canvas->width = width;
+    canvas->height = height;
+    canvas->mode = get_terminal_mode();
     
     #ifdef USE_ARENA
     void *blob = arena_alloc(arena, (size_t)(width * height) * sizeof(Pixel) + sizeof(Pixel *) * (size_t)(height));
     #else
-    void *blob = malloc((size_t)(width * height) * sizeof(Pixel) + sizeof(Pixel *) * (size_t)(height));
+    void *blob = malloc((size_t)(width * height) * sizeof(TcPixel) + sizeof(TcPixel *) * (size_t)(height));
     #endif
 
-    screen->pixels = (Pixel **)blob;
+    canvas->pixels = (TcPixel **)blob;
 
-    Pixel pixel = (Pixel) {background, foreground, symbol, Effect_None};
+    TcPixel pixel = (TcPixel) {background, foreground, symbol, Effect_None};
     for (int i = 0; i < height; i++) {
-        screen->pixels[i] = (Pixel *)(void *)((char *)blob + sizeof(Pixel *) * (size_t)(height) + (size_t)(i) * (size_t)(width) * sizeof(Pixel));
+        canvas->pixels[i] = (TcPixel *)(void *)((char *)blob + sizeof(TcPixel *) * (size_t)(height) + (size_t)(i) * (size_t)(width) * sizeof(TcPixel));
         for (int j = 0; j < width; j++) {
-            screen->pixels[i][j] = pixel;
+            canvas->pixels[i][j] = pixel;
         }
     }
     
-    screen->buffer_size = ((15) * screen->width * screen->height + 8 + screen->height) / 20;
+    canvas->buffer_size = ((15) * canvas->width * canvas->height + 8 + canvas->height) / 20;
 
     #ifdef USE_ARENA
-    screen->buffer = (wchar_t *)arena_alloc(arena, sizeof(wchar_t) * (size_t)(screen->buffer_size));
+    canvas->buffer = (wchar_t *)arena_alloc(arena, sizeof(wchar_t) * (size_t)(canvas->buffer_size));
     #else
-    screen->buffer = (wchar_t *)malloc(sizeof(wchar_t) * (size_t)(screen->buffer_size));
+    canvas->buffer = (wchar_t *)malloc(sizeof(wchar_t) * (size_t)(canvas->buffer_size));
     #endif
 
-
-
     setlocale(LC_ALL, "");
-    hide_cursor();
-    clear();
+    tc_hide_cursor();
+    tc_clear();
 
-    return screen;
+    return canvas;
 }
 
 /*
  * Shuts down the screen.
  * Restores terminal settings and clears the screen.
  */
-void screen_shutdown(TermCanvas *screen) {
-    if (!screen) return; // defensive check
+void tc_destroy(TermCanvas *canvas) {
+    if (!canvas) return;
 
     #ifdef USE_ARENA
-    arena_free_block(screen->buffer);  // free buffer
-    arena_free_block(screen->pixels);  // free pixels
+    arena_free_block(canvas->buffer);  // free buffer
+    arena_free_block(canvas->pixels);  // free pixels
     #else
-    free(screen->buffer);  // free buffer
-    free(screen->pixels);  // free pixels
+    free(canvas->buffer);  // free buffer
+    free(canvas->pixels);  // free pixels
     #endif
 
-    clear();           // Clear the screen
-    show_cursor();     // Show the cursor
+    tc_clear();           // Clear the canvas
+    tc_show_cursor();     // Show the cursor
 }
 
 
@@ -510,75 +513,93 @@ void screen_shutdown(TermCanvas *screen) {
  * Add borders to specified area of screen
  * Creates a border using provided border characters
  */
-void add_borders(TermCanvas *screen, int y, int x, int height, int width, Color background, Color foreground, const wchar_t *borders) {
-    if (!screen || !borders) return; // Check for NULL pointers
+void tc_draw_borders(TermCanvas *canvas, int x, int y, int width, int height, const wchar_t *borders, Color foreground, Color background, TcEffect effect) {
+    if (!canvas || !borders) return; // Check for NULL pointers
     if (y < 0 || x < 0 || height <= 0 || width <= 0) return; //basic checks
-    if (y + height > screen->height || x + width > screen->width) return;
+    if (y + height > canvas->height || x + width > canvas->width) return;
 
     // Draw horizontal borders (top and bottom)
-    Pixel horizontal_pixel = (Pixel) {background, foreground, borders[0], Effect_None};
+    TcPixel horizontal_pixel = (TcPixel) {background, foreground, borders[0], effect};
     for (int i = 0; i < width; ++i) {
-        SET_PIXEL(&screen->pixels[y][x + i], horizontal_pixel);
-        SET_PIXEL(&screen->pixels[y + height - 1][x + i], horizontal_pixel);
+        SET_PIXEL(&canvas->pixels[y][x + i], horizontal_pixel);
+        SET_PIXEL(&canvas->pixels[y + height - 1][x + i], horizontal_pixel);
     }
 
     // Draw vertical borders (left and right)
-    Pixel vertical_pixel = (Pixel) {background, foreground, borders[1], Effect_None};
+    TcPixel vertical_pixel = (TcPixel) {background, foreground, borders[1], effect};
     for (int i = 0; i < height; ++i) {
-        SET_PIXEL(&screen->pixels[y + i][x], vertical_pixel);
-        SET_PIXEL(&screen->pixels[y + i][x + width - 1], vertical_pixel);
+        SET_PIXEL(&canvas->pixels[y + i][x], vertical_pixel);
+        SET_PIXEL(&canvas->pixels[y + i][x + width - 1], vertical_pixel);
     }
 
     // Set corner characters
-    screen->pixels[y][x].symbol = borders[2];                          // Top-left
-    screen->pixels[y][x + width - 1].symbol = borders[3];              // Top-right
-    screen->pixels[y + height - 1][x].symbol = borders[4];             // Bottom-left
-    screen->pixels[y + height - 1][x + width - 1].symbol = borders[5]; // Bottom-right
+    canvas->pixels[y][x].symbol = borders[2];                          // Top-left
+    canvas->pixels[y][x + width - 1].symbol = borders[3];              // Top-right
+    canvas->pixels[y + height - 1][x].symbol = borders[4];             // Bottom-left
+    canvas->pixels[y + height - 1][x + width - 1].symbol = borders[5]; // Bottom-right
 }
 
 /*
- * Add separator line to screen
+ * Add horizontasl separator line to screen
  * Used for visual separation of screen areas
  */
-void add_separator(TermCanvas *screen, int y, int x, Color background, Color foreground , const wchar_t *borders) {
-    if (!screen || !borders) return;
+void tc_draw_hline(TermCanvas *canvas, int x, int y, const wchar_t *borders, Color foreground, Color background, TcEffect effect) {
+    if (!canvas || !borders) return;
     if (y < 0 || x < 0) return;
-    if (y >= screen->height || x >= screen->width) return;
+    if (y >= canvas->height || x >= canvas->width) return;
 
-    Pixel pixel = (Pixel) {background, foreground, borders[0], Effect_Bold}; // Use bold effect
-    for (int i = 0; i < screen->width; ++i) {
-        SET_PIXEL(&screen->pixels[y][x + i], pixel);
+    TcPixel pixel = (TcPixel) {background, foreground, borders[0], effect};
+    for (int i = 0; i < canvas->width; ++i) {
+        SET_PIXEL(&canvas->pixels[y][x + i], pixel);
     }
     // Set separator start/end characters
-    screen->pixels[y][x].symbol = borders[6];
-    screen->pixels[y][screen->width - 1].symbol = borders[7];
+    canvas->pixels[y][x].symbol = borders[6];
+    canvas->pixels[y][canvas->width - 1].symbol = borders[7];
+}
+
+/*
+ * Add vertical separator line to screen
+ * Used for visual separation of screen areas
+ */
+void tc_draw_vline(TermCanvas *canvas, int x, int y, const wchar_t *borders, Color foreground, Color background, TcEffect effect) {
+    if (!canvas || !borders) return;
+    if (y < 0 || x < 0) return;
+    if (y >= canvas->height || x >= canvas->width) return;
+
+    TcPixel pixel = (TcPixel) {background, foreground, borders[0], effect};
+    for (int i = 0; i < canvas->height; ++i) {
+        SET_PIXEL(&canvas->pixels[y + i][x], pixel);
+    }
+    // Set separator start/end characters
+    canvas->pixels[y][x].symbol = borders[6];
+    canvas->pixels[canvas->height - 1][x].symbol = borders[7];
 }
 
 /*
  * Print screen content to terminal
  * Outputs the entire screen buffer with formatting
  */
-void print_screen(const TermCanvas *screen) {
-    if (!screen) return;
+void tc_show(const TermCanvas *canvas) {
+    if (!canvas) return;
 
     int buf_idx = 0;
 
     // Move cursor to the top-left corner (home position)
-    buf_idx += swprintf(screen->buffer + buf_idx, MAX_ANSI_LENGTH, L"\033[0;0H");
+    buf_idx += swprintf(canvas->buffer + buf_idx, MAX_ANSI_LENGTH, L"\033[0;0H");
 
     // Initialize last colors/effect to a value that won't match any real pixel
     Color last_bg = COLOR_NONE;
     Color last_fg = COLOR_NONE;
-    TextEffect last_effect = Effect_None;
+    TcEffect last_effect = Effect_None;
 
-    for (int y = 0; y < screen->height; ++y) {
-        for (int x = 0; x < screen->width; ++x) {
-            Pixel px = screen->pixels[y][x];
+    for (int y = 0; y < canvas->height; ++y) {
+        for (int x = 0; x < canvas->width; ++x) {
+            TcPixel px = canvas->pixels[y][x];
 
             // Buffer overflow check
-            if ((int)buf_idx > screen->buffer_size - MAX_ANSI_LENGTH) {
-                screen->buffer[buf_idx] = L'\0'; // Null-terminate the string
-                wprintf(L"%ls", screen->buffer); // Print the buffer
+            if ((int)buf_idx > canvas->buffer_size - MAX_ANSI_LENGTH) {
+                canvas->buffer[buf_idx] = L'\0'; // Null-terminate the string
+                wprintf(L"%ls", canvas->buffer); // Print the buffer
                 buf_idx = 0;                     // Reset the index
             }
 
@@ -588,10 +609,10 @@ void print_screen(const TermCanvas *screen) {
                 px.effect != last_effect) {
 
                 // Combine reset, effect, and color setting into one escape sequence
-                buf_idx += swprintf(screen->buffer + buf_idx, MAX_ANSI_LENGTH,
+                buf_idx += swprintf(canvas->buffer + buf_idx, MAX_ANSI_LENGTH,
                                     L"\033[0m%s%s", // Reset and then set new attributes
                                     get_effect_ansi(px.effect),
-                                    get_color_ansi(px.foreground, px.background, screen->mode)
+                                    get_color_ansi(px.foreground, px.background, canvas->mode)
                                     );
                 // Update last known colors/effect
                 last_bg = px.background;
@@ -600,13 +621,13 @@ void print_screen(const TermCanvas *screen) {
             }
 
             // Add the character to the buffer
-            screen->buffer[buf_idx++] = px.symbol;
+            canvas->buffer[buf_idx++] = px.symbol;
         }
-        screen->buffer[buf_idx++] = L'\n'; // Add a newline at the end of each row
+        canvas->buffer[buf_idx++] = L'\n'; // Add a newline at the end of each row
     }
 
-    screen->buffer[buf_idx] = L'\0';        // Null-terminate the string
-    wprintf(L"%ls\033[0m", screen->buffer); // Print the entire buffer and reset
+    canvas->buffer[buf_idx] = L'\0';        // Null-terminate the string
+    wprintf(L"%ls\033[0m", canvas->buffer); // Print the entire buffer and reset
 }
 
 
@@ -614,13 +635,13 @@ void print_screen(const TermCanvas *screen) {
  * Put pixel at specified position
  * Puts a pixel at the specified position with specified symbol, background and foreground formatting
  */
-void put_pixel(TermCanvas *screen, int y, int x, wchar_t symbol, Color background, Color foreground, TextEffect effect) {
-    if (!screen) return; // NULL check
+void tc_put_pixel(TermCanvas *canvas, int x, int y, wchar_t symbol, Color foreground, Color background, TcEffect effect) {
+    if (!canvas) return; // NULL check
     if (x < 0 || y < 0) return;
-    if (x >= screen->width || y >= screen->height) return;
+    if (x >= canvas->width || y >= canvas->height) return;
 
-    Pixel pixel = (Pixel) {background, foreground, symbol, effect}; // Create the pixel
-    SET_PIXEL(&screen->pixels[y][x], pixel); // Set the pixel using the macro
+    TcPixel pixel = (TcPixel) {background, foreground, symbol, effect}; // Create the pixel
+    SET_PIXEL(&canvas->pixels[y][x], pixel); // Set the pixel using the macro
 }
 
 
@@ -628,15 +649,15 @@ void put_pixel(TermCanvas *screen, int y, int x, wchar_t symbol, Color backgroun
  * Fill rectangular area with specified symbol
  * Fills the area with specified symbol, background and foreground formatting
  */
-void fill_area(TermCanvas *screen, int y, int x, int height, int width, wchar_t symbol, Color background, Color foreground) {
-    if (!screen) return; // NULL check
+void tc_fill_area(TermCanvas *canvas, int x, int y, int width, int height, wchar_t symbol, Color foreground, Color background, TcEffect effect) {
+    if (!canvas) return; // NULL check
     if (x < 0 || y < 0 || height <= 0 || width <= 0) return;
-    if (x + width > screen->width || y + height > screen->height) return;
+    if (x + width > canvas->width || y + height > canvas->height) return;
 
-    Pixel pixel = (Pixel) {background, foreground, symbol, Effect_None}; // Create the pixel
+    TcPixel pixel = (TcPixel) {background, foreground, symbol, effect}; // Create the pixel
     for (int i = y; i < y + height; i++) {
         for (int j = x; j < x + width; j++) {
-            SET_PIXEL(&screen->pixels[i][j], pixel); // Set the pixel using the macro
+            SET_PIXEL(&canvas->pixels[i][j], pixel); // Set the pixel using the macro
         }
     }
 }
@@ -645,23 +666,23 @@ void fill_area(TermCanvas *screen, int y, int x, int height, int width, wchar_t 
  * Insert text into screen
  * Inserts text into the screen at the specified position
  */
-void insert_text(TermCanvas *screen, int y, int x, const char *text, Color foreground, Color background, TextEffect effect) {
-    if (!screen || !text) return; // Check for NULL pointers
+void tc_draw_text(TermCanvas *canvas, int x, int y, const char *text, Color foreground, Color background, TcEffect effect) {
+    if (!canvas || !text) return; // Check for NULL pointers
     if(x < 0 || y < 0) return;
-    if (y >= screen->height || x >= screen->width) return;
+    if (y >= canvas->height || x >= canvas->width) return;
 
     int text_length;
     for (text_length = 0; text[text_length] != '\0'; text_length++);
 
-    if (x + text_length > screen->width) {
-        text_length = screen->width - x;  // Truncate if text goes beyond screen width
+    if (x + text_length > canvas->width) {
+        text_length = canvas->width - x;  // Truncate if text goes beyond screen width
     }
     
-    Pixel pixel = (Pixel) {background, foreground, ' ', effect};
+    TcPixel pixel = (TcPixel) {background, foreground, ' ', effect};
     for (int i = 0; i < text_length; i++) {
-        SET_PIXEL(&screen->pixels[y][x + i], pixel);
-        screen->pixels[y][x + i].symbol = text[i];
-        screen->pixels[y][x + i].effect = effect;
+        SET_PIXEL(&canvas->pixels[y][x + i], pixel);
+        canvas->pixels[y][x + i].symbol = text[i];
+        canvas->pixels[y][x + i].effect = effect;
     }
 }
 
@@ -669,23 +690,23 @@ void insert_text(TermCanvas *screen, int y, int x, const char *text, Color foreg
  * Insert wide text into screen
  * Inserts wide text into the screen at the specified position
  */
-void insert_wtext(TermCanvas *screen, int y, int x, const wchar_t *text, Color foreground, Color background, TextEffect effect) {
-    if (!screen || !text) return; // Check for NULL pointers
+void tc_draw_wtext(TermCanvas *canvas, int x, int y, const wchar_t *text, Color foreground, Color background, TcEffect effect) {
+    if (!canvas || !text) return; // Check for NULL pointers
     if(x < 0 || y < 0) return;
-    if (y >= screen->height || x >= screen->width) return;
+    if (y >= canvas->height || x >= canvas->width) return;
 
     int text_length;
     for (text_length = 0; text[text_length] != L'\0'; text_length++);
 
-    if (x + text_length > screen->width) {
-        text_length = screen->width - x;  // Truncate if text goes beyond screen width
+    if (x + text_length > canvas->width) {
+        text_length = canvas->width - x;  // Truncate if text goes beyond screen width
     }
     
-    Pixel pixel = (Pixel) {background, foreground, ' ', effect};
+    TcPixel pixel = (TcPixel) {background, foreground, ' ', effect};
     for (int i = 0; i < text_length; i++) {
-        SET_PIXEL(&screen->pixels[y][x + i], pixel);
-        screen->pixels[y][x + i].symbol = text[i];
-        screen->pixels[y][x + i].effect = effect;
+        SET_PIXEL(&canvas->pixels[y][x + i], pixel);
+        canvas->pixels[y][x + i].symbol = text[i];
+        canvas->pixels[y][x + i].effect = effect;
     }
 }
 #endif // TERMCANVAS_IMPLEMENTATION
