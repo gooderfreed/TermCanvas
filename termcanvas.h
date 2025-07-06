@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/ioctl.h>
 #include <math.h>
 #include <locale.h>
 
@@ -13,31 +14,13 @@
 #include "color.h"
 
 
-/*
- * Terminal control macros
- * Basic terminal manipulation commands
- */
-
 // -----------------------------------------------------------------------------
-//  Constants and Macros
+//  Type Definitions
 // -----------------------------------------------------------------------------
-#define MAX_ANSI_LENGTH 50 // Define a reasonable maximum for ANSI sequences
-
-
-// Terminal control macros
-#define tc_clear()       wprintf(L"\033[H\033[J")          // Clear the entire screen
-#define tc_gotoxy(x, y)  wprintf(L"\033[%d;%dH", (y), (x)) // Position cursor
-#define tc_hide_cursor() wprintf(L"\033[?25l")             // Hide the cursor
-#define tc_show_cursor() wprintf(L"\033[?25h")             // Show the cursor
-
-
 typedef enum TcEffect TcEffect;
 typedef struct TcPixel TcPixel;
 typedef struct TermCanvas TermCanvas;
 
-// -----------------------------------------------------------------------------
-//  Type Definitions
-// -----------------------------------------------------------------------------
 /*
  * Text effects (bold, italic, etc.).
  */
@@ -52,7 +35,7 @@ enum TcEffect {
 };
 
 /*
- * Represents a single pixel on the screen.
+ * Represents a single pixel on the canvas.
  */
 struct TcPixel {
     Color    background; // Background color
@@ -71,96 +54,75 @@ typedef enum {
     Color_Base, // Basic 8/16 colors
     Color_256,  // 256-color mode
     Color_RGB   // TrueColor (RGB) mode
-} TerminalMode;
+} TcTerminalColorMode;
 
 
 /*
- * Screen structure
- * Represents the game screen with dimensions, pixel data, and a render buffer.
+ * canvas structure
+ * Represents the game canvas with dimensions, pixel data, and a render buffer.
  */
 struct TermCanvas {
-    int height;        // Screen height in pixels
-    int width;         // Screen width in pixels
-    TcPixel **pixels;    // 2D array of pixel data
+    int height;        // canvas height in pixels
+    int width;         // canvas width in pixels
+    TcPixel **pixels;  // 2D array of pixel data
     
     wchar_t *buffer;   // Render buffer for output
     int buffer_size;   // Size of the render buffer
 
-    TerminalMode mode; // Terminal color mode
+    int terminal_w;    // Terminal width in pixels
+    int terminal_h;    // Terminal height in pixels
+    bool enough_space;
+
+    TcTerminalColorMode mode; // Terminal color mode
 };
 
+// -----------------------------------------------------------------------------
+//  Constants and Macros
+// -----------------------------------------------------------------------------
+#define tc_clear()             wprintf(L"\033[H\033[J")          // Clear the entire canvas
+#define tc_gotoxy(x, y)        wprintf(L"\033[%d;%dH", (y), (x)) // Position cursor
+#define tc_hide_cursor()       wprintf(L"\033[?25l")             // Hide the cursor
+#define tc_show_cursor()       wprintf(L"\033[?25h")             // Show the cursor
+#define tc_swich_to_buffer()   wprintf(L"\033[?1049h");          // 
+#define tc_swich_from_buffer() wprintf(L"\033[?1049l");          // 
+#define MAX_ANSI_LENGTH 50 // Define a reasonable maximum for ANSI sequences
 
-/*
-* Screen functions
-* Screen manipulation and drawing
-*/
 
-// Screen management
+// -----------------------------------------------------------------------------
+//  Canvas Methods
+// -----------------------------------------------------------------------------
 #ifdef USE_ARENA
 TermCanvas *tc_create(Arena *arena, int width, int height, wchar_t symbol, Color foreground, Color background);
 #else
 TermCanvas *tc_create(int width, int height, wchar_t symbol, Color foreground, Color background);
 #endif
-
 void tc_destroy(TermCanvas *canvas);
-void tc_show(const TermCanvas *canvas);
-
-// Drawing functions
-void tc_draw_borders(TermCanvas *canvas, int x, int y, int width, int height, const wchar_t *borders, Color foreground, Color background, TcEffect effect);
-void tc_draw_hline(TermCanvas   *canvas, int x, int y,                        const wchar_t *borders, Color foreground, Color background, TcEffect effect);
-void tc_draw_wline(TermCanvas   *canvas, int x, int y,                        const wchar_t *borders, Color foreground, Color background, TcEffect effect);
-void tc_fill_area(TermCanvas    *canvas, int x, int y, int width, int height, wchar_t symbol,         Color foreground, Color background, TcEffect effect);
-void tc_put_pixel(TermCanvas    *canvas, int x, int y,                        wchar_t symbol,         Color foreground, Color background, TcEffect effect);
-void tc_draw_text(TermCanvas    *canvas, int x, int y,                        const char *text,       Color foreground, Color background, TcEffect effect);
-void tc_draw_wtext(TermCanvas   *canvas, int x, int y,                        const wchar_t *text,    Color foreground, Color background, TcEffect effect);
-
-
-// -----------------------------------------------------------------------------
-//  Macros for Pixel Manipulation
-// -----------------------------------------------------------------------------
-#define SET_PIXEL_FOREGROUND(pixel, color)                 \
-    if (!is_none(color)) (pixel)->foreground = (color);
-
-#define SET_PIXEL_BACKGROUND(pixel, color)                 \
-    if (!is_none(color)) (pixel)->background = (color);
-
-#define SET_PIXEL_COLOR(pixel, config)                     \
-    SET_PIXEL_FOREGROUND(pixel, (config).foreground)       \
-    SET_PIXEL_BACKGROUND(pixel, (config).background)
-    
-#define SET_PIXEL(pixel_target, pixel_source)              \
-    do {                                                   \
-        SET_PIXEL_COLOR(pixel_target, pixel_source)        \
-        (pixel_target)->symbol = (pixel_source).symbol;    \
-    } while(0);
 
 
 
 #ifdef TERMCANVAS_IMPLEMENTATION
 // -----------------------------------------------------------------------------
-//  ANSI Escape Code Generation
+//  Terminal Capability Detection
 // -----------------------------------------------------------------------------
 /*
- * Generates an ANSI escape sequence for text effects.
- * It formats the text effect into the ANSI escape sequence.
+ * Gets the size of the terminal.
+ * It gets the size of the terminal by checking the terminal size using ioctl.
  */
-static char* get_effect_ansi(TcEffect effect) {
-    static char ansi_str[16];             // Buffer for the ANSI escape sequence
-    if (effect == Effect_None) return ""; // Return empty string if no effect
+static void tc_get_terminal_size(TermCanvas *canvas) {
+    int w = 80;
+    int h = 24;
 
-    snprintf(ansi_str, sizeof(ansi_str), "\033[%dm", (int)effect);
-    return ansi_str;
+    if (isatty(STDOUT_FILENO)) {
+        struct winsize ws;
+        if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != -1 && ws.ws_col > 0 && ws.ws_row > 0) {
+            w = ws.ws_col;
+            h = ws.ws_row;
+        }
+    }
+    
+    canvas->terminal_w = w;
+    canvas->terminal_h = h;
 }
-
-
-
-// -----------------------------------------------------------------------------
-//  Terminal Capability Detection (tput)
-// -----------------------------------------------------------------------------
-
-// static inline int is_terminal(void) {
-//     return isatty(STDOUT_FILENO);
-// }
 
 /*
  * Checks if the 'tput' command exists in the system.
@@ -233,7 +195,7 @@ static int supports_256(int tput_colors) {
     if (term) {
         // Check for common terminal types that often support 256 colors
         if (strstr(term, "xterm")  || strstr(term, "rxvt")  || strstr(term, "linux")     ||
-            strstr(term, "screen") || strstr(term, "tmux")  || strstr(term, "vt100")     ||
+            strstr(term, "canvas") || strstr(term, "tmux")  || strstr(term, "vt100")     ||
             strstr(term, "vt220")  || strstr(term, "ansi")  || strstr(term, "konsole")   ||
             strstr(term, "Eterm")  || strstr(term, "gnome") || strstr(term, "alacritty") ||
             strstr(term, "st")     || strstr(term, "foot")  || strstr(term, "kitty")) {
@@ -252,7 +214,7 @@ static int supports_256(int tput_colors) {
  * It checks if the terminal supports TrueColor or 256-color mode,
  * and returns the appropriate TerminalMode enum value.
  */
-static TerminalMode get_terminal_mode(void) {
+static TcTerminalColorMode get_terminal_mode(void) {
     int tput_colors = get_cached_tput_colors();
 
     if (supports_rgb(tput_colors)) return Color_RGB;
@@ -262,9 +224,21 @@ static TerminalMode get_terminal_mode(void) {
 }
 
 
+
 // -----------------------------------------------------------------------------
-//  ANSI Escape Code Generation (Color Conversion)
+//  ANSI Escape Code Generation (Color Conversion and Effect)
 // -----------------------------------------------------------------------------
+/*
+ * Generates an ANSI escape sequence for text effects.
+ * It formats the text effect into the ANSI escape sequence.
+ */
+static char* get_effect_ansi(TcEffect effect) {
+    static char ansi_str[16];             // Buffer for the ANSI escape sequence
+    if (effect == Effect_None) return ""; // Return empty string if no effect
+
+    snprintf(ansi_str, sizeof(ansi_str), "\033[%dm", (int)effect);
+    return ansi_str;
+}
 
 /*
  * Converts RGB color to an ANSI escape sequence for TrueColor terminals.
@@ -426,7 +400,7 @@ static char *rgb_to_ansi_base(Color fg_color, Color bg_color) {
  * - Color_256: Uses rgb_to_ansi_256 for 256-color terminals
  * - Color_Base: Uses rgb_to_ansi_base for basic 8/16 color terminals
  */
-static char* get_color_ansi(Color fg_color, Color bg_color, TerminalMode mode) {
+static char* get_color_ansi(Color fg_color, Color bg_color, TcTerminalColorMode mode) {
     switch (mode) {
         case Color_RGB:   return rgb_to_ansi(fg_color, bg_color);
         case Color_256:   return rgb_to_ansi_256(fg_color, bg_color);
@@ -438,11 +412,11 @@ static char* get_color_ansi(Color fg_color, Color bg_color, TerminalMode mode) {
 
 
 // -----------------------------------------------------------------------------
-//  Screen Initialization and Shutdown
+//  Canvas Functionality
 // -----------------------------------------------------------------------------
 /*
- * Initializes an empty screen.
- * Creates the screen structure with cleared buffers and sets the terminal mode.
+ * Initializes an empty canvas.
+ * Creates the canvas structure with cleared buffers
  */
 #ifdef USE_ARENA
 TermCanvas *tc_create(Arena *arena, int width, int height, wchar_t symbol, Color foreground, Color background) {
@@ -481,14 +455,14 @@ TermCanvas *tc_create(int width, int height, wchar_t symbol, Color foreground, C
 
     setlocale(LC_ALL, "");
     tc_hide_cursor();
-    tc_clear();
+    tc_swich_to_buffer();
 
     return canvas;
 }
 
 /*
- * Shuts down the screen.
- * Restores terminal settings and clears the screen.
+ * Shuts down the canvas.
+ * Restores from buffer and clears the canvas.
  */
 void tc_destroy(TermCanvas *canvas) {
     if (!canvas) return;
@@ -496,93 +470,87 @@ void tc_destroy(TermCanvas *canvas) {
     #ifdef USE_ARENA
     arena_free_block(canvas->buffer);  // free buffer
     arena_free_block(canvas->pixels);  // free pixels
+    arena_free_block(canvas);
     #else
     free(canvas->buffer);  // free buffer
     free(canvas->pixels);  // free pixels
+    free(canvas);
     #endif
 
     tc_clear();           // Clear the canvas
+    tc_swich_from_buffer();
     tc_show_cursor();     // Show the cursor
 }
 
 
-// -----------------------------------------------------------------------------
-//  Drawing Functions
-// -----------------------------------------------------------------------------
-/*
- * Add borders to specified area of screen
- * Creates a border using provided border characters
- */
-void tc_draw_borders(TermCanvas *canvas, int x, int y, int width, int height, const wchar_t *borders, Color foreground, Color background, TcEffect effect) {
-    if (!canvas || !borders) return; // Check for NULL pointers
-    if (y < 0 || x < 0 || height <= 0 || width <= 0) return; //basic checks
-    if (y + height > canvas->height || x + width > canvas->width) return;
-
-    // Draw horizontal borders (top and bottom)
-    TcPixel horizontal_pixel = (TcPixel) {background, foreground, borders[0], effect};
-    for (int i = 0; i < width; ++i) {
-        SET_PIXEL(&canvas->pixels[y][x + i], horizontal_pixel);
-        SET_PIXEL(&canvas->pixels[y + height - 1][x + i], horizontal_pixel);
-    }
-
-    // Draw vertical borders (left and right)
-    TcPixel vertical_pixel = (TcPixel) {background, foreground, borders[1], effect};
-    for (int i = 0; i < height; ++i) {
-        SET_PIXEL(&canvas->pixels[y + i][x], vertical_pixel);
-        SET_PIXEL(&canvas->pixels[y + i][x + width - 1], vertical_pixel);
-    }
-
-    // Set corner characters
-    canvas->pixels[y][x].symbol = borders[2];                          // Top-left
-    canvas->pixels[y][x + width - 1].symbol = borders[3];              // Top-right
-    canvas->pixels[y + height - 1][x].symbol = borders[4];             // Bottom-left
-    canvas->pixels[y + height - 1][x + width - 1].symbol = borders[5]; // Bottom-right
-}
-
-/*
- * Add horizontasl separator line to screen
- * Used for visual separation of screen areas
- */
-void tc_draw_hline(TermCanvas *canvas, int x, int y, const wchar_t *borders, Color foreground, Color background, TcEffect effect) {
-    if (!canvas || !borders) return;
-    if (y < 0 || x < 0) return;
-    if (y >= canvas->height || x >= canvas->width) return;
-
-    TcPixel pixel = (TcPixel) {background, foreground, borders[0], effect};
-    for (int i = 0; i < canvas->width; ++i) {
-        SET_PIXEL(&canvas->pixels[y][x + i], pixel);
-    }
-    // Set separator start/end characters
-    canvas->pixels[y][x].symbol = borders[6];
-    canvas->pixels[y][canvas->width - 1].symbol = borders[7];
-}
-
-/*
- * Add vertical separator line to screen
- * Used for visual separation of screen areas
- */
-void tc_draw_vline(TermCanvas *canvas, int x, int y, const wchar_t *borders, Color foreground, Color background, TcEffect effect) {
-    if (!canvas || !borders) return;
-    if (y < 0 || x < 0) return;
-    if (y >= canvas->height || x >= canvas->width) return;
-
-    TcPixel pixel = (TcPixel) {background, foreground, borders[0], effect};
-    for (int i = 0; i < canvas->height; ++i) {
-        SET_PIXEL(&canvas->pixels[y + i][x], pixel);
-    }
-    // Set separator start/end characters
-    canvas->pixels[y][x].symbol = borders[6];
-    canvas->pixels[canvas->height - 1][x].symbol = borders[7];
-}
-
-/*
- * Print screen content to terminal
- * Outputs the entire screen buffer with formatting
- */
-void tc_show(const TermCanvas *canvas) {
+static void tc_show_too_small(TermCanvas *canvas) {
     if (!canvas) return;
 
+    tc_gotoxy(0, 0);
+    wchar_t buffer[1024];
     int buf_idx = 0;
+
+    char buffer1[6];
+    char buffer2[6];
+
+    int str1_len = snprintf(buffer1, 6, "%i", canvas->terminal_w);
+    int str2_len = snprintf(buffer2, 6, "%i", canvas->terminal_h);
+    int half_off_str_len = (str1_len + str2_len) / 2;
+    
+    int base_y_offset = canvas->terminal_h / 2;
+    int base_x_offset = canvas->terminal_w / 2 - 1;
+
+    for (int y = 0; y < canvas->terminal_h; ++y) {
+        if (y == base_y_offset) {
+            for (int x = 0; x < (base_x_offset-half_off_str_len); ++x) {
+                buffer[buf_idx++] = L' '; 
+            }
+            buf_idx += swprintf(buffer + buf_idx, MAX_ANSI_LENGTH, L"\033[0m%s%s%s",
+                get_effect_ansi(Effect_None),
+                get_color_ansi(canvas->terminal_w < canvas->width ? COLOR_RED : COLOR_GREEN, COLOR_BLACK, canvas->mode),
+                &buffer1
+            );
+            buf_idx += swprintf(buffer + buf_idx, 36, L"\033[0m%s%sx",
+                get_effect_ansi(Effect_None),
+                get_color_ansi(COLOR_WHITE, COLOR_BLACK, canvas->mode)
+            );
+            buf_idx += swprintf(buffer + buf_idx, MAX_ANSI_LENGTH, L"\033[0m%s%s%s",
+                get_effect_ansi(Effect_None),
+                get_color_ansi(canvas->terminal_h < canvas->height ? COLOR_RED : COLOR_GREEN, COLOR_BLACK, canvas->mode),
+                &buffer2
+            );
+            buf_idx += swprintf(buffer + buf_idx, 9, L"\033[0m\033[K\n");
+        }
+        else {
+            buf_idx += swprintf(buffer + buf_idx, 9, L"\033[0m\033[K\n");
+        }
+    }
+
+
+    buffer[--buf_idx] = L'\0'; 
+    wprintf(L"%ls\033[0m", buffer);
+}
+
+
+void tc_show(TermCanvas *canvas) {
+    if (!canvas) return;
+
+    tc_get_terminal_size(canvas);
+    if (canvas->width > canvas->terminal_w || canvas->height > canvas->terminal_h) {
+        tc_show_too_small(canvas);
+        canvas->enough_space = false;
+        return;
+    }
+    
+    int buf_idx = 0;
+    
+    if (!canvas->enough_space) {
+        int half = canvas->terminal_h / 2 + 2;
+        for (int y = 0; y < half; ++y) {
+            buf_idx += swprintf(canvas->buffer + buf_idx, MAX_ANSI_LENGTH, L"\033[%d;0H\033[K", y);
+        }
+        canvas->enough_space = true;
+    }
 
     // Move cursor to the top-left corner (home position)
     buf_idx += swprintf(canvas->buffer + buf_idx, MAX_ANSI_LENGTH, L"\033[0;0H");
@@ -592,7 +560,13 @@ void tc_show(const TermCanvas *canvas) {
     Color last_fg = COLOR_NONE;
     TcEffect last_effect = Effect_None;
 
-    for (int y = 0; y < canvas->height; ++y) {
+    for (int y = 0; y < canvas->height && y < canvas->terminal_h; ++y) {
+        buf_idx += swprintf(canvas->buffer + buf_idx, MAX_ANSI_LENGTH,
+            L"\033[0m%s%s",
+            get_effect_ansi(last_effect),
+            get_color_ansi(last_fg, last_bg, canvas->mode)
+        );
+        
         for (int x = 0; x < canvas->width; ++x) {
             TcPixel px = canvas->pixels[y][x];
 
@@ -613,7 +587,7 @@ void tc_show(const TermCanvas *canvas) {
                                     L"\033[0m%s%s", // Reset and then set new attributes
                                     get_effect_ansi(px.effect),
                                     get_color_ansi(px.foreground, px.background, canvas->mode)
-                                    );
+                );
                 // Update last known colors/effect
                 last_bg = px.background;
                 last_fg = px.foreground;
@@ -623,100 +597,18 @@ void tc_show(const TermCanvas *canvas) {
             // Add the character to the buffer
             canvas->buffer[buf_idx++] = px.symbol;
         }
-        canvas->buffer[buf_idx++] = L'\n'; // Add a newline at the end of each row
+        // canvas->buffer[buf_idx++] = L'\n'; // Add a newline at the end of each row
+        buf_idx += swprintf(canvas->buffer + buf_idx, 9, L"\033[0m\033[K\n");
     }
-
-    canvas->buffer[buf_idx] = L'\0';        // Null-terminate the string
+    canvas->buffer[--buf_idx] = L'\0';      // Null-terminate the string
     wprintf(L"%ls\033[0m", canvas->buffer); // Print the entire buffer and reset
 }
 
 
-/*
- * Put pixel at specified position
- * Puts a pixel at the specified position with specified symbol, background and foreground formatting
- */
-void tc_put_pixel(TermCanvas *canvas, int x, int y, wchar_t symbol, Color foreground, Color background, TcEffect effect) {
-    if (!canvas) return; // NULL check
-    if (x < 0 || y < 0) return;
-    if (x >= canvas->width || y >= canvas->height) return;
-
-    TcPixel pixel = (TcPixel) {background, foreground, symbol, effect}; // Create the pixel
-    SET_PIXEL(&canvas->pixels[y][x], pixel); // Set the pixel using the macro
-}
 
 
-/*
- * Fill rectangular area with specified symbol
- * Fills the area with specified symbol, background and foreground formatting
- */
-void tc_fill_area(TermCanvas *canvas, int x, int y, int width, int height, wchar_t symbol, Color foreground, Color background, TcEffect effect) {
-    if (!canvas) return; // NULL check
 
-    int x1 = (x < 0) ? 0 : x;
-    int y1 = (y < 0) ? 0 : y;
-    
-    int x2 = x + width;
-    x2 = (x2 > canvas->width) ? canvas->width : x2;
-    int y2 = y + height;
-    y2 = (y2 > canvas->height) ? canvas->height : y2;
 
-    if (x1 < x2 && y1 < y2) {
-        TcPixel pixel = (TcPixel) {background, foreground, symbol, effect}; // Create the pixel
-        for (int i = y1; i < y2; i++) {
-            for (int j = x1; j < x2; j++) {
-                SET_PIXEL(&canvas->pixels[i][j], pixel); // Set the pixel using the macro
-            }
-        }
-    }
-}
-
-/*
- * Insert text into screen
- * Inserts text into the screen at the specified position
- */
-void tc_draw_text(TermCanvas *canvas, int x, int y, const char *text, Color foreground, Color background, TcEffect effect) {
-    if (!canvas || !text) return; // Check for NULL pointers
-    if(x < 0 || y < 0) return;
-    if (y >= canvas->height || x >= canvas->width) return;
-
-    int text_length;
-    for (text_length = 0; text[text_length] != '\0'; text_length++);
-
-    if (x + text_length > canvas->width) {
-        text_length = canvas->width - x;  // Truncate if text goes beyond screen width
-    }
-    
-    TcPixel pixel = (TcPixel) {background, foreground, ' ', effect};
-    for (int i = 0; i < text_length; i++) {
-        SET_PIXEL(&canvas->pixels[y][x + i], pixel);
-        canvas->pixels[y][x + i].symbol = text[i];
-        canvas->pixels[y][x + i].effect = effect;
-    }
-}
-
-/*
- * Insert wide text into screen
- * Inserts wide text into the screen at the specified position
- */
-void tc_draw_wtext(TermCanvas *canvas, int x, int y, const wchar_t *text, Color foreground, Color background, TcEffect effect) {
-    if (!canvas || !text) return; // Check for NULL pointers
-    if(x < 0 || y < 0) return;
-    if (y >= canvas->height || x >= canvas->width) return;
-
-    int text_length;
-    for (text_length = 0; text[text_length] != L'\0'; text_length++);
-
-    if (x + text_length > canvas->width) {
-        text_length = canvas->width - x;  // Truncate if text goes beyond screen width
-    }
-    
-    TcPixel pixel = (TcPixel) {background, foreground, ' ', effect};
-    for (int i = 0; i < text_length; i++) {
-        SET_PIXEL(&canvas->pixels[y][x + i], pixel);
-        canvas->pixels[y][x + i].symbol = text[i];
-        canvas->pixels[y][x + i].effect = effect;
-    }
-}
 #endif // TERMCANVAS_IMPLEMENTATION
 
 #endif // TERMCANVAS_H
